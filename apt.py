@@ -1,14 +1,14 @@
+import settings
 import re
 import os
 import requests
 import json
 from subprocess import Popen, PIPE
 
+api_url = settings.api_url
+nodename = settings.nodename
 
-api_url = "http://localhost:8081/farm/api/"
 api_headers = {'content-type': 'application/json'}
-nodename = "luna"
-
 
 def reverse_sub(regex, string):
     ret = ""
