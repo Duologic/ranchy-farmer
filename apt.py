@@ -1,14 +1,78 @@
-import settings
 import re
 import os
-import requests
-import json
+import sys
+import logging
 from subprocess import Popen, PIPE
+from raven.handlers.logging import SentryHandler
+from raven.conf import setup_logging
 
-api_url = settings.api_url
-nodename = settings.nodename
+import settings
+from api import Api
 
-api_headers = {'content-type': 'application/json'}
+# Logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
+if settings.sentry:
+    handler = SentryHandler(settings.sentry)
+    setup_logging(handler)
+
+# Settings
+adh_bin = getattr(settings, 'apt-dater-host-binary', "/usr/bin/apt-dater-host")
+api_url = getattr(settings, 'api_url', False)
+nodename = getattr(settings, 'nodename', False)
+
+if not os.path.exists(adh_bin):
+    sys.stderr.write("%s not found" % adh_bin)
+    logger.log(logging.WARNING, "%s not found" % adh_bin)
+    exit(1)
+
+if not api_url:
+    sys.stderr.write("api_url not set")
+    logger.log(logging.CRITICAL, "api_url not set")
+    exit(1)
+
+if not nodename:
+    sys.stderr.write("nodename not set")
+    logger.log(logging.CRITICAL, "nodename not set")
+    exit(1)
+
+
+def collect_data():
+    try:
+        with open(os.devnull, 'w') as dnull:
+            rawoutput = Popen([adh_bin, 'status'],
+                              stdout=PIPE,
+                              stderr=dnull).communicate()
+    except:
+        sys.stderr.write("%s could not be executed!" % adh_bin)
+        logger.log(logging.CRITICAL, "%s could not be executed!" % adh_bin)
+        exit(1)
+
+    try:
+        rawoutput_lines = rawoutput[0].split("\n")
+        packagelist = {}
+
+        for line in rawoutput_lines:
+            if re.match('^STATUS:', line):
+                local_package = line[8:len(line)].split('|')
+
+                temp = {}
+                temp['current'] = local_package[1].strip()
+                temp['latest'] = local_package[1].strip()
+                temp['hasupdate'] = False
+
+                if re.match('^u=', local_package[2].strip()):
+                    temp['latest'] = local_package[2].split("=")[1].strip()
+                    temp['hasupdate'] = True
+
+                packagelist[local_package[0].strip()] = temp
+    except:
+        sys.stderr.write("local packagelist could not be composed")
+        logger.log(logging.CRITICAL, "local packagelist could not be composed")
+        exit(1)
+
+    return packagelist
+
 
 def reverse_sub(regex, string):
     ret = ""
@@ -20,109 +84,18 @@ def reverse_sub(regex, string):
     return ret
 
 
-def collect_data():
-
-    try:
-        with open(os.devnull, 'w') as dnull:
-            rawoutput = Popen(['apt-dater-host', 'status'],
-                              stdout=PIPE,
-                              stderr=dnull).communicate()
-    except:
-        print "apt-dater-host could not be executed."
-        exit(1)
-
-    rawoutput_lines = rawoutput[0].split("\n")
-    packagelist = {}
-
-    for line in rawoutput_lines:
-        if re.match('^STATUS:', line):
-            local_package = line[8:len(line)].split('|')
-
-            temp = {}
-            temp['current'] = local_package[1].strip()
-            temp['latest'] = local_package[1].strip()
-            temp['hasupdate'] = False
-
-            if re.match('^u=', local_package[2].strip()):
-                temp['latest'] = local_package[2].split("=")[1].strip()
-                temp['hasupdate'] = True
-
-            packagelist[local_package[0].strip()] = temp
-    return packagelist
-
-
-def get_urls(api_url):
-    response = requests.get(api_url, headers=api_headers)
-    if response.status_code == 200:
-        return json.loads(response.text)
-    else:
-        return response.status_code
-
-
-def get_item(url):
-    response = requests.get(url, headers=api_headers)
-    if response.status_code == 200:
-        queryset = json.loads(response.text)
-        return queryset
-    else:
-        return response.status_code
-
-
-def get_list(url):
-    result = {}
-    response = requests.get(url, headers=api_headers)
-    if response.status_code == 200:
-        queryset = json.loads(response.text)
-        if queryset['count'] > 0:
-            result = queryset['results']
-            while queryset['next'] != None:
-                response = requests.get(queryset['next'], headers=api_headers)
-                if response.status_code == 200:
-                    queryset = json.loads(response.text)
-                    result = result + queryset['results']
-            return result
-        else:
-            return []
-    else:
-        return response.status_code
-
-
-def create_items(url, items):
-    data = json.dumps(items)
-    response = requests.post(url, data, headers=api_headers)
-    if response.status_code == 201:
-        queryset = json.loads(response.text)
-        return queryset
-    else:
-        return response.status_code
-
-
-def update_items(url, items):
-    data = json.dumps(items)
-    response = requests.put(url, data, headers=api_headers)
-    if response.status_code == 201:
-        queryset = json.loads(response.text)
-        return queryset
-    else:
-        return response.status_code
-
-
-def find_key(dictionary, key):
-    for keys in dictionary:
-        if key in keys:
-            return True
-    return False
-
-
-def do_checks():
-    urls = get_urls(api_url)
+def main():
+    api = Api(api_url)
+    urls = api.get_urls()
     local_packages = collect_data()
-    node = get_item(urls['node'] + nodename)
+    node = api.get_item(urls['node'] + nodename)
 
     if node:
-        remote_packages = get_list(urls['package']+'?packagetype=1')
-        remote_packagechecks = get_list(node['url_packagecheck']+'&packagetype=1')
-        
+        # Request package information
+        remote_packages = api.get_list(urls['package']+'?packagetype=1')
+        remote_packagechecks = api.get_list(node['url_packagecheck']+'&packagetype=1')
+
+        # Check if new packages have been installed
         new_packages = []
         for local_package in local_packages:
             found = None
@@ -136,22 +109,23 @@ def do_checks():
 
             if found is None:
                 new_package = {'name': local_package,
-                              'slug': slug,
-                              'packagetype': '1'}
+                               'slug': slug,
+                               'packagetype': '1'}
 
                 new_packages.append(new_package)
 
-        created = create_items(urls['package'], new_packages)
+        # Create new packages
+        created = api.create_items(urls['package'], new_packages)
         remote_packages.extend(created)
 
+        # Update existing packagechecks
         local_packagechecks = []
         looplist_local_packages = list(local_packages)
-
         for local_package in looplist_local_packages:
             slug = reverse_sub("([a-z0-9-_]+)", local_package)
 
             if len(remote_packagechecks) > 0:
-                index=0
+                index = 0
                 for remote_packagecheck in remote_packagechecks:
                     if remote_packagecheck['package'] == urls['package'] + slug + '/':
                         local_packagecheck = remote_packagechecks.pop(index)
@@ -164,11 +138,13 @@ def do_checks():
                         break
                     index = index + 1
 
+        # Set uninstalled flag on removed packages
         for remote_packagecheck in remote_packagechecks:
             uninstalled_package = remote_packagecheck
             uninstalled_package['uninstalled'] = True
             local_packagechecks.append(uninstalled_package)
 
+        # Create new packagechecks
         new_local_packagechecks = []
         for local_package in local_packages:
             slug = reverse_sub("([a-z0-9-_]+)", local_package)
@@ -178,9 +154,9 @@ def do_checks():
             lp['uninstalled'] = False
             new_local_packagechecks.append(lp)
 
+        # Execute updates and new packagechecks
+        api.update_items(urls['packagecheck'], local_packagechecks)
+        api.create_items(urls['packagecheck'], new_local_packagechecks)
 
-        update_items(urls['packagecheck'], local_packagechecks)
-        create_items(urls['packagecheck'], new_local_packagechecks)
-
-
-do_checks()
+if __name__=='__main__':
+    main()
