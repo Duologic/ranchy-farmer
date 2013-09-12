@@ -21,3 +21,5 @@ build
 test_scripts
 
 *bootstrap*
+
+settings.py
