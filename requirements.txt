@@ -1,1 +1,2 @@
 requests
+raven==2.0.10
