@@ -3,12 +3,14 @@ import json
 
 class Api(object):
     api_headers = {'content-type': 'application/json'}
-    api_url = None
-    last_response = None
 
     class RequestError(Exception):
-        def __init__(self, value):
+        def __init__(self, value, response=None):
             self.value = value
+            self.response = response
+        
+        def get_response(self):
+            return self.response
 
         def __str__(self):
             return repr(self.value)
@@ -59,7 +61,9 @@ class Api(object):
         data = json.dumps(items)
         response = requests.post(url, data, headers=self.api_headers)
         self.last_response = response
-        if response.status_code == 201:
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 201:
             queryset = json.loads(response.text)
             return queryset
         else:
@@ -70,8 +74,10 @@ class Api(object):
         data = json.dumps(items)
         response = requests.put(url, data, headers=self.api_headers)
         self.last_response = response
-        if response.status_code == 201:
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 201:
             queryset = json.loads(response.text)
             return queryset
         else:
-            raise self.RequestError("Request returned HTTP status %s" % response.status_code)
+            raise self.RequestError("Request returned HTTP status %s" % response.status_code, response.text)

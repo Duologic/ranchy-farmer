@@ -9,32 +9,6 @@ from raven.conf import setup_logging
 import settings
 from api import Api
 
-# Logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
-if settings.sentry:
-    handler = SentryHandler(settings.sentry)
-    setup_logging(handler)
-
-# Settings
-adh_bin = getattr(settings, 'apt-dater-host-binary', "/usr/bin/apt-dater-host")
-api_url = getattr(settings, 'api_url', False)
-nodename = getattr(settings, 'nodename', False)
-
-if not os.path.exists(adh_bin):
-    sys.stderr.write("%s not found" % adh_bin)
-    logger.log(logging.WARNING, "%s not found" % adh_bin)
-    exit(1)
-
-if not api_url:
-    sys.stderr.write("api_url not set")
-    logger.log(logging.CRITICAL, "api_url not set")
-    exit(1)
-
-if not nodename:
-    sys.stderr.write("nodename not set")
-    logger.log(logging.CRITICAL, "nodename not set")
-    exit(1)
 
 
 def collect_data():
@@ -44,8 +18,7 @@ def collect_data():
                               stdout=PIPE,
                               stderr=dnull).communicate()
     except:
-        sys.stderr.write("%s could not be executed!" % adh_bin)
-        logger.log(logging.CRITICAL, "%s could not be executed!" % adh_bin)
+        logger.log(logging.CRITICAL, "%s could not be executed!" % adh_bin, extra={'stack': True,})
         exit(1)
 
     try:
@@ -66,9 +39,10 @@ def collect_data():
                     temp['hasupdate'] = True
 
                 packagelist[local_package[0].strip()] = temp
+    except Exception as e:
+        logger.error(e.value, exc_info=True)
     except:
-        sys.stderr.write("local packagelist could not be composed")
-        logger.log(logging.CRITICAL, "local packagelist could not be composed")
+        logger.log(logging.CRITICAL, "local packagelist could not be composed", extra={'stack': True,})
         exit(1)
 
     return packagelist
@@ -85,15 +59,21 @@ def reverse_sub(regex, string):
 
 
 def main():
-    api = Api(api_url)
-    urls = api.get_urls()
-    local_packages = collect_data()
-    node = api.get_item(urls['node'] + nodename)
+    try:
+        api = Api(api_url)
+        urls = api.get_urls()
+        local_packages = collect_data()
+        node = api.get_item(urls['node'] + nodename)
+    except Exception as e:
+        logger.error(e.value, exc_info=True)
 
     if node:
         # Request package information
-        remote_packages = api.get_list(urls['package']+'?packagetype=1')
-        remote_packagechecks = api.get_list(node['url_packagecheck']+'&packagetype=1')
+        try:
+            remote_packages = api.get_list(urls['package']+'?packagetype=1')
+            remote_packagechecks = api.get_list(node['url_packagecheck']+'&packagetype=1')
+        except Exception as e:
+            logger.error(e.value, exc_info=True)
 
         # Check if new packages have been installed
         new_packages = []
@@ -115,8 +95,11 @@ def main():
                 new_packages.append(new_package)
 
         # Create new packages
-        created = api.create_items(urls['package'], new_packages)
-        remote_packages.extend(created)
+        try:
+            created = api.create_items(urls['package'], new_packages)
+            remote_packages.extend(created)
+        except Exception as e:
+            logger.error(e.value, exc_info=True)
 
         # Update existing packagechecks
         local_packagechecks = []
@@ -155,8 +138,44 @@ def main():
             new_local_packagechecks.append(lp)
 
         # Execute updates and new packagechecks
-        api.update_items(urls['packagecheck'], local_packagechecks)
-        api.create_items(urls['packagecheck'], new_local_packagechecks)
+        try:
+            api.update_items(urls['packagecheck'], local_packagechecks)
+            api.create_items(urls['packagecheck'], new_local_packagechecks)
+        except Exception as e:
+            logger.error(e, exc_info=True)
 
 if __name__=='__main__':
-    main()
+    # Logging
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.WARNING)
+
+    if getattr(settings, 'debug', False):
+        stream = logging.StreamHandler(sys.stderr)
+        logger.addHandler(stream)
+
+    sentry = getattr(settings, 'sentry', False)
+    if sentry:
+        handler = SentryHandler(sentry)
+        setup_logging(handler)
+
+    # Settings
+    adh_bin = getattr(settings, 'apt-dater-host-binary', "/usr/bin/apt-dater-host")
+    api_url = getattr(settings, 'api_url', False)
+    nodename = getattr(settings, 'nodename', False)
+
+    if not os.path.exists(adh_bin):
+        logger.log(logging.WARNING, "%s not found" % adh_bin, extra={'stack': True,})
+        exit(1)
+
+    if not api_url:
+        logger.log(logging.CRITICAL, "api_url not set", extra={'stack': True,})
+        exit(1)
+
+    if not nodename:
+        logger.log(logging.CRITICAL, "nodename not set", extra={'stack': True,})
+        exit(1)
+
+    try:
+        main()
+    except Exception as e:
+        logger.error(e.value, exc_info=True)
